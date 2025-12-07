@@ -5,7 +5,7 @@ import path from 'path';
 
 // IMPORTS FOR BROWSERS
 // We import these dynamically inside the function to avoid crashes
-import puppeteer from 'puppeteer'; // Standard for Local
+import puppeteerCore from 'puppeteer-core';
 import chromium from '@sparticuz/chromium';// Compressed for Vercel
 import puppeteerCore from 'puppeteer-core'; // Core for Vercel
 
@@ -31,118 +31,115 @@ function saveToHistory(record) {
 
 // --- HELPER: GET BROWSER INSTANCE ---
 async function getBrowser() {
-  if (process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_VERSION) {
-    try {
-      // 1. Configure the path to the Remote Binary
-      // This matches the @sparticuz/chromium version 127.0.0
-      const executablePath = await chromium.executablePath(
-        "https://github.com/Sparticuz/chromium/releases/download/v127.0.0/chromium-v127.0.0-pack.tar"
-      );
+  // 1. REMOTE BROWSER (Production / Vercel)
+  const BROWSERLESS_TOKEN = process.env.BROWSERLESS_TOKEN;
 
-      // 2. Launch with specific flags to prevent File Locking (ETXTBSY)
-      const browser = await puppeteerCore.launch({
-        args: chromium.args,
-        defaultViewport: chromium.defaultViewport,
-        executablePath: executablePath,
-        headless: chromium.headless,
-      });
-      return browser;
-    } catch (error) {
-      console.error("Vercel Browser Error:", error);
-      throw error;
-    }
-  } else {
-    // --- LOCALHOST CONFIG ---
-    const puppeteer = await import('puppeteer').then(mod => mod.default); 
-    return await puppeteer.launch({
-      headless: "new",
-      args: ['--no-sandbox']
+  if (process.env.VERCEL && BROWSERLESS_TOKEN) {
+    console.log("Connecting to Remote Browser...");
+    return await puppeteerCore.connect({
+      browserWSEndpoint: `wss://chrome.browserless.io?token=${BROWSERLESS_TOKEN}`,
     });
+  } 
+  
+  // 2. FALLBACK / LOCAL (If you are on localhost and want to use local Chrome)
+  // You will need to install 'puppeteer' as a dev-dependency for this to work locally
+  // npm install puppeteer --save-dev
+  try {
+    const puppeteer = await import('puppeteer').then(mod => mod.default);
+    return await puppeteer.launch({ headless: "new" });
+  } catch (err) {
+    throw new Error("Local Puppeteer not found. If running locally, install 'puppeteer'. If on Vercel, set BROWSERLESS_TOKEN.");
   }
 }
 // 1. CHART PHOTOGRAPHER
 async function captureChart() {
-  const browser = await getBrowser();
-  const page = await browser.newPage();
-  await page.setViewport({ width: 1920, height: 1080 });
-
-  await page.goto('https://www.tradingview.com/chart/?symbol=OANDA:XAUUSD', {
-    waitUntil: 'networkidle2',
-    timeout: 30000 
-  });
-
+  let browser = null;
   try {
-    await page.waitForSelector('.chart-gui-wrapper', { visible: true, timeout: 5000 });
-  } catch (e) {
-    console.log("Chart selector timeout, attempting capture anyway.");
-  }
+    browser = await getBrowser();
+    const page = await browser.newPage();
+    await page.setViewport({ width: 1920, height: 1080 });
 
-  // Return Base64 image
-  const imageBuffer = await page.screenshot();
-  const base64Image = `data:image/png;base64,${imageBuffer.toString('base64')}`;
-  
-  await browser.close();
-  return base64Image;
-}
+    await page.goto('https://www.tradingview.com/chart/?symbol=OANDA:XAUUSD', {
+      waitUntil: 'networkidle2',
+      timeout: 30000 
+    });
 
-// 2. NEWS & AI BRAIN
-async function getAnalysis() {
-  const browser = await getBrowser();
-  const page = await browser.newPage();
-  
-  // Speed Optimization: Block images/fonts/css to scrape faster
-  await page.setRequestInterception(true);
-  page.on('request', (req) => {
-    if (['image', 'stylesheet', 'font', 'media'].includes(req.resourceType())) {
-      req.abort();
-    } else {
-      req.continue();
+    // Wait for chart
+    try {
+      await page.waitForSelector('.chart-gui-wrapper', { visible: true, timeout: 10000 });
+    } catch (e) {
+      console.log("Chart selector timeout, attempting capture anyway.");
     }
-  });
 
-  await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36');
-  await page.goto('https://www.forexfactory.com/news', { waitUntil: 'domcontentloaded' });
-  
-  const headlines = await page.evaluate(() => {
-    return Array.from(document.querySelectorAll('.flexposts__story-title'))
-      .slice(0, 3)
-      .map(h => h.innerText.trim());
-  });
-  await browser.close();
-
-  // AI Logic
-  const apiKey = process.env.OPENAI_API_KEY;
-  if (!apiKey) {
-    return { headline: headlines[0] || "Market Data", script: "No API Key provided." };
+    const imageBuffer = await page.screenshot();
+    const base64Image = `data:image/png;base64,${imageBuffer.toString('base64')}`;
+    
+    await browser.close();
+    return base64Image;
+  } catch (error) {
+    if (browser) await browser.close();
+    throw error;
   }
-  
-  const openai = new OpenAI({ apiKey: apiKey });
-  const completion = await openai.chat.completions.create({
-      messages: [{ role: "user", content: `Summarize these headlines into 1 sentence: ${JSON.stringify(headlines)}` }],
-      model: "gpt-3.5-turbo",
-  });
-  
-  return {
-      headline: headlines[0],
-      script: completion.choices[0].message.content
-  };
 }
 
-// 3. MAIN HANDLER
+async function getAnalysis() {
+  let browser = null;
+  try {
+    browser = await getBrowser();
+    const page = await browser.newPage();
+    
+    // Speed Optimization
+    await page.setRequestInterception(true);
+    page.on('request', (req) => {
+      if (['image', 'media', 'font'].includes(req.resourceType())) {
+        req.abort();
+      } else {
+        req.continue();
+      }
+    });
+
+    await page.goto('https://www.forexfactory.com/news', { waitUntil: 'domcontentloaded' });
+    
+    const headlines = await page.evaluate(() => {
+      return Array.from(document.querySelectorAll('.flexposts__story-title'))
+        .slice(0, 3)
+        .map(h => h.innerText.trim());
+    });
+    await browser.close();
+
+    // AI Logic
+    const apiKey = process.env.OPENAI_API_KEY;
+    if (!apiKey) return { headline: headlines[0] || "Market Data", script: "No API Key provided." };
+    
+    const openai = new OpenAI({ apiKey: apiKey });
+    const completion = await openai.chat.completions.create({
+        messages: [{ role: "user", content: `Summarize: ${JSON.stringify(headlines)}` }],
+        model: "gpt-3.5-turbo",
+    });
+    
+    return { headline: headlines[0], script: completion.choices[0].message.content };
+  } catch (error) {
+    if (browser) await browser.close();
+    // Return safe data if scraping fails
+    return { headline: "Market Update", script: "Unable to fetch live news at this moment." };
+  }
+}
+
+// --- MAIN API HANDLER ---
 export async function POST() {
   try {
-    // Run concurrently for speed
     const [imagePath, aiData] = await Promise.all([captureChart(), getAnalysis()]);
 
-    const newRecord = {
-      id: Date.now(),
-      date: new Date().toLocaleString(),
-      image: imagePath,
-      headline: aiData.headline,
-      script: aiData.script
-    };
-
-    return NextResponse.json({ success: true, data: newRecord });
+    return NextResponse.json({ 
+      success: true, 
+      data: {
+        id: Date.now(),
+        date: new Date().toLocaleString(),
+        image: imagePath,
+        headline: aiData.headline,
+        script: aiData.script
+      } 
+    });
 
   } catch (error) {
     console.error("Critical Server Error:", error);
