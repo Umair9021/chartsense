@@ -30,16 +30,16 @@ function saveToHistory(record) {
 // --- HELPER: GET BROWSER INSTANCE ---
 async function getBrowser() {
   // CHECK: Are we on Vercel?
-  if (process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_VERSION) {
-    // CONFIG FOR VERCEL (Cloud)
+if (process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_VERSION) {
     return await puppeteerCore.launch({
       args: chromium.args,
       defaultViewport: chromium.defaultViewport,
-      executablePath: await chromium.executablePath(),
+      // UPDATE THIS LINE:
+      executablePath: await chromium.executablePath(), 
       headless: chromium.headless,
       ignoreHTTPSErrors: true,
     });
-  } else {
+} else {
     // CONFIG FOR LOCALHOST (Windows/Mac)
     return await puppeteer.launch({
       headless: "new",
