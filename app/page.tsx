@@ -1,21 +1,33 @@
 "use client";
 import React from 'react';
 import Link from 'next/link';
+import { SignInButton, SignedIn, SignedOut, UserButton } from '@clerk/nextjs';
 
 export default function Home() {
   return (
     <div style={styles.container}>
       {/* 1. NAVBAR */}
       <nav style={styles.nav}>
-        <div style={styles.logo}>⚡ ChartSense</div>
-        <div style={styles.navLinks}>
-          <a href="#features" style={styles.link}>Features</a>
-          <a href="#pricing" style={styles.link}>Pricing</a>
-          <Link href="/dashboard">
-            <button style={styles.loginBtn}>Launch App</button>
-          </Link>
-        </div>
-      </nav>
+  <div style={styles.logo}>⚡ ChartSense</div>
+  <div style={styles.navLinks}>
+    <a href="#features" style={styles.link}>Features</a>
+    
+    {/* SHOW THIS IF LOGGED OUT */}
+    <SignedOut>
+      <SignInButton mode="modal">
+        <button style={styles.loginBtn}>Sign In</button>
+      </SignInButton>
+    </SignedOut>
+
+    {/* SHOW THIS IF LOGGED IN */}
+    <SignedIn>
+      <Link href="/dashboard">
+        <button style={styles.loginBtn}>Dashboard</button>
+      </Link>
+      <UserButton afterSignOutUrl="/"/>
+    </SignedIn>
+  </div>
+</nav>
 
       {/* 2. HERO SECTION */}
       <header style={styles.hero}>
