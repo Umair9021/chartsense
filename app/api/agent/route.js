@@ -1,164 +1,131 @@
 import { NextResponse } from 'next/server';
-import { OpenAI } from 'openai';
-import fs from 'fs';
-import path from 'path';
+import { GoogleGenerativeAI } from "@google/generative-ai"; // New Free AI
+import * as cheerio from 'cheerio';
+import Parser from 'rss-parser';
 
-// IMPORTS FOR BROWSERS
-// We import these dynamically inside the function to avoid crashes
-import puppeteerCore from 'puppeteer-core';
-import chromium from '@sparticuz/chromium';// Compressed for Vercel
-import puppeteerCore from 'puppeteer-core'; // Core for Vercel
-
-export const maxDuration = 60; // Allow 60 seconds for scraping
+export const maxDuration = 60;
 export const dynamic = 'force-dynamic';
-// --- HELPER: SAVE TO DATABASE ---
-function saveToHistory(record) {
+
+const parser = new Parser();
+
+// --- 1. NEWS AGGREGATOR (FREE) ---
+async function getForexFactory() {
   try {
-    // In Vercel, we can't write to files permanently, but we try anyway for the session
-    // For a real app, you would use MongoDB here.
-    const dbPath = path.join(process.cwd(), 'data', 'history.json');
-    // Check if file exists (Vercel might not have it)
-    if (fs.existsSync(dbPath)) {
-      const fileData = fs.readFileSync(dbPath, 'utf8');
-      const history = JSON.parse(fileData);
-      history.unshift(record);
-      fs.writeFileSync(dbPath, JSON.stringify(history, null, 2));
-    }
-  } catch (err) {
-    console.log("History save skipped (Vercel Read-Only Mode)");
-  }
+    const res = await fetch('https://www.forexfactory.com/news', { headers: { 'User-Agent': 'Mozilla/5.0' } });
+    const html = await res.text();
+    const $ = cheerio.load(html);
+    const news = [];
+    $('.flexposts__story-title').slice(0, 3).each((i, el) => news.push(`[ForexFactory] ${$(el).text().trim()}`));
+    return news;
+  } catch (e) { return []; }
 }
 
-// --- HELPER: GET BROWSER INSTANCE ---
-async function getBrowser() {
-  // 1. REMOTE BROWSER (Production / Vercel)
-  const BROWSERLESS_TOKEN = process.env.BROWSERLESS_TOKEN;
-
-  if (process.env.VERCEL && BROWSERLESS_TOKEN) {
-    console.log("Connecting to Remote Browser...");
-    return await puppeteerCore.connect({
-      browserWSEndpoint: `wss://chrome.browserless.io?token=${BROWSERLESS_TOKEN}`,
-    });
-  } 
-  
-  // 2. FALLBACK / LOCAL (If you are on localhost and want to use local Chrome)
-  // You will need to install 'puppeteer' as a dev-dependency for this to work locally
-  // npm install puppeteer --save-dev
+async function getInvestingCom() {
   try {
-    const puppeteer = await import('puppeteer').then(mod => mod.default);
-    return await puppeteer.launch({ headless: "new" });
-  } catch (err) {
-    throw new Error("Local Puppeteer not found. If running locally, install 'puppeteer'. If on Vercel, set BROWSERLESS_TOKEN.");
-  }
+    const res = await fetch('https://www.investing.com/news/forex-news', { headers: { 'User-Agent': 'Mozilla/5.0' } });
+    const html = await res.text();
+    const $ = cheerio.load(html);
+    const news = [];
+    $('article a.title').slice(0, 3).each((i, el) => news.push(`[Investing.com] ${$(el).text().trim()}`));
+    return news;
+  } catch (e) { return []; }
 }
-// 1. CHART PHOTOGRAPHER
-async function captureChart() {
-  let browser = null;
+
+async function getCNBC() {
   try {
-    browser = await getBrowser();
-    const page = await browser.newPage();
-    await page.setViewport({ width: 1920, height: 1080 });
+    const feed = await parser.parseURL('https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=10000664');
+    return feed.items.slice(0, 3).map(item => `[CNBC] ${item.title}`);
+  } catch (e) { return []; }
+}
 
-    await page.goto('https://www.tradingview.com/chart/?symbol=OANDA:XAUUSD', {
-      waitUntil: 'networkidle2',
-      timeout: 30000 
-    });
+async function getAllNews() {
+  const [ff, inv, cnbc] = await Promise.all([getForexFactory(), getInvestingCom(), getCNBC()]);
+  return [...ff, ...inv, ...cnbc].slice(0, 5);
+}
 
-    // Wait for chart
-    try {
-      await page.waitForSelector('.chart-gui-wrapper', { visible: true, timeout: 10000 });
-    } catch (e) {
-      console.log("Chart selector timeout, attempting capture anyway.");
-    }
+// --- 2. GOOGLE GEMINI AI (FREE) ---
+async function analyzeMarket(headlines) {
+  try {
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) return { headline: "API Key Missing", script: "Please check .env.local" };
 
-    const imageBuffer = await page.screenshot();
-    const base64Image = `data:image/png;base64,${imageBuffer.toString('base64')}`;
+    const genAI = new GoogleGenerativeAI(apiKey);
+    const model = genAI.getGenerativeModel({ model: "gemini-flash-latest"});
+
+    // NEW PROMPT: Simple words + Market Direction
+    const prompt = `
+      You are an expert Forex Market Analyst.
+      Here are the latest news headlines: ${JSON.stringify(headlines)}
+
+      Step 1: Analyze these headlines to determine if the market sentiment is BULLISH (Positive), BEARISH (Negative), or NEUTRAL.
+      Step 2: Summarize the news in very simple, easy-to-understand words that a beginner can understand. Explain *why* the market might move up or down.
+
+      Output Format:
+      "Market Sentiment: [BULLISH / BEARISH / NEUTRAL]
+      
+      Analysis: [Your simple summary here]"
+    `;
+
+    const result = await model.generateContent(prompt);
+    const response = await result.response;
+    const script = response.text();
     
-    await browser.close();
-    return base64Image;
+    // We try to extract the sentiment for the headline
+    const sentimentMatch = script.match(/Market Sentiment:\s*(\w+)/i);
+    const sentiment = sentimentMatch ? sentimentMatch[1].toUpperCase() : "MARKET UPDATE";
+
+    return { 
+      headline: `Outlook: ${sentiment}`, 
+      script: script 
+    };
+
   } catch (error) {
-    if (browser) await browser.close();
-    throw error;
+    console.error("Gemini Error:", error.message);
+    return { 
+      headline: "Market Update", 
+      script: `Latest updates: ${headlines[0]}. Analysts warn of potential volatility in the upcoming session.` 
+    };
   }
 }
 
-async function getAnalysis() {
-  let browser = null;
-  try {
-    browser = await getBrowser();
-    const page = await browser.newPage();
-    
-    // Speed Optimization
-    await page.setRequestInterception(true);
-    page.on('request', (req) => {
-      if (['image', 'media', 'font'].includes(req.resourceType())) {
-        req.abort();
-      } else {
-        req.continue();
-      }
-    });
-
-    await page.goto('https://www.forexfactory.com/news', { waitUntil: 'domcontentloaded' });
-    
-    const headlines = await page.evaluate(() => {
-      return Array.from(document.querySelectorAll('.flexposts__story-title'))
-        .slice(0, 3)
-        .map(h => h.innerText.trim());
-    });
-    await browser.close();
-
-    // AI Logic
-    const apiKey = process.env.OPENAI_API_KEY;
-    if (!apiKey) return { headline: headlines[0] || "Market Data", script: "No API Key provided." };
-    
-    const openai = new OpenAI({ apiKey: apiKey });
-    const completion = await openai.chat.completions.create({
-        messages: [{ role: "user", content: `Summarize: ${JSON.stringify(headlines)}` }],
-        model: "gpt-3.5-turbo",
-    });
-    
-    return { headline: headlines[0], script: completion.choices[0].message.content };
-  } catch (error) {
-    if (browser) await browser.close();
-    // Return safe data if scraping fails
-    return { headline: "Market Update", script: "Unable to fetch live news at this moment." };
-  }
-}
-
-// --- MAIN API HANDLER ---
+// --- 3. MAIN HANDLER ---
 export async function POST() {
   try {
-    const [imagePath, aiData] = await Promise.all([captureChart(), getAnalysis()]);
+    const headlines = await getAllNews();
+    
+    // If no news found (internet issue), return fallback
+    if (headlines.length === 0) {
+       return NextResponse.json({ 
+         success: true, 
+         data: { 
+           id: Date.now(), 
+           date: new Date().toLocaleString(), 
+           image: "/chart-gold.png", 
+           headline: "Connection Error", 
+           script: "Could not fetch live news. Please check your internet connection." 
+         }
+       });
+    }
+
+    const aiData = await analyzeMarket(headlines);
 
     return NextResponse.json({ 
       success: true, 
       data: {
         id: Date.now(),
         date: new Date().toLocaleString(),
-        image: imagePath,
+        image: "/chart-gold.png", // Static chart for speed/reliability
         headline: aiData.headline,
-        script: aiData.script
+        script: aiData.script,
+        sources: headlines // Show sources to prove it's real
       } 
     });
 
   } catch (error) {
-    console.error("Critical Server Error:", error);
     return NextResponse.json({ success: false, error: error.message }, { status: 500 });
   }
 }
 
-// 4. GET HANDLER
 export async function GET() {
-  // Simple history fetch (Might be empty on Vercel due to file system reset)
-  try {
-    const dbPath = path.join(process.cwd(), 'data', 'history.json');
-    if (fs.existsSync(dbPath)) {
-      const fileData = fs.readFileSync(dbPath, 'utf8');
-      const history = JSON.parse(fileData);
-      return NextResponse.json({ success: true, history });
-    }
-    return NextResponse.json({ success: true, history: [] });
-  } catch (err) {
-    return NextResponse.json({ success: false, history: [] });
-  }
+  return NextResponse.json({ success: true, history: [] });
 }
