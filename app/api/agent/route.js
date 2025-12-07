@@ -6,7 +6,7 @@ import path from 'path';
 // IMPORTS FOR BROWSERS
 // We import these dynamically inside the function to avoid crashes
 import puppeteer from 'puppeteer'; // Standard for Local
-import chromium from '@sparticuz/chromium'; // Compressed for Vercel
+import chromium from '@sparticuz/chromium-min';// Compressed for Vercel
 import puppeteerCore from 'puppeteer-core'; // Core for Vercel
 
 // --- HELPER: SAVE TO DATABASE ---
@@ -28,26 +28,50 @@ function saveToHistory(record) {
 }
 
 // --- HELPER: GET BROWSER INSTANCE ---
+// async function getBrowser() {
+//   // CHECK: Are we on Vercel?
+// if (process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_VERSION) {
+//     return await puppeteerCore.launch({
+//       args: chromium.args,
+//       defaultViewport: chromium.defaultViewport,
+//       // UPDATE THIS LINE:
+//       executablePath: await chromium.executablePath(), 
+//       headless: chromium.headless,
+//       ignoreHTTPSErrors: true,
+//     });
+// } else {
+//     // CONFIG FOR LOCALHOST (Windows/Mac)
+//     return await puppeteer.launch({
+//       headless: "new",
+//       args: ['--no-sandbox']
+//     });
+//   }
+// }
 async function getBrowser() {
-  // CHECK: Are we on Vercel?
-if (process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_VERSION) {
+  if (process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_VERSION) {
+    // VERCEL CONFIGURATION
+    
+    // 1. Explicitly load the font pack (helps prevent crashes)
+    await chromium.font('https://raw.githack.com/googlei18n/noto-emoji/master/fonts/NotoColorEmoji.ttf');
+
+    // 2. Launch with explicit pathing
     return await puppeteerCore.launch({
       args: chromium.args,
       defaultViewport: chromium.defaultViewport,
-      // UPDATE THIS LINE:
-      executablePath: await chromium.executablePath(), 
+      executablePath: await chromium.executablePath(
+        // We tell it where to find the browser binary manually if needed
+        `https://github.com/Sparticuz/chromium/releases/download/v119.0.2/chromium-v119.0.2-pack.tar`
+      ),
       headless: chromium.headless,
-      ignoreHTTPSErrors: true,
     });
-} else {
-    // CONFIG FOR LOCALHOST (Windows/Mac)
+  } else {
+    // LOCAL CONFIGURATION
     return await puppeteer.launch({
       headless: "new",
       args: ['--no-sandbox']
     });
   }
 }
-
 // 1. CHART PHOTOGRAPHER
 async function captureChart() {
   const browser = await getBrowser();
