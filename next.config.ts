@@ -1,11 +1,11 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  // 1. This helps Vercel trace files better
-  output: 'standalone', 
+  // Standalone output reduces file size issues
+  output: 'standalone',
   
-  // 2. Tell Webpack NOT to bundle these packages
+  // Important: Exclude these from Webpack bundling
   experimental: {
-    serverComponentsExternalPackages: ['puppeteer-core', '@sparticuz/chromium-min'],
+    serverComponentsExternalPackages: ['puppeteer-core', '@sparticuz/chromium'],
   },
 };
 

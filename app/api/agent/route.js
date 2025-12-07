@@ -6,9 +6,11 @@ import path from 'path';
 // IMPORTS FOR BROWSERS
 // We import these dynamically inside the function to avoid crashes
 import puppeteer from 'puppeteer'; // Standard for Local
-import chromium from '@sparticuz/chromium-min';// Compressed for Vercel
+import chromium from '@sparticuz/chromium';// Compressed for Vercel
 import puppeteerCore from 'puppeteer-core'; // Core for Vercel
 
+export const maxDuration = 60; // Allow 60 seconds for scraping
+export const dynamic = 'force-dynamic';
 // --- HELPER: SAVE TO DATABASE ---
 function saveToHistory(record) {
   try {
@@ -28,44 +30,30 @@ function saveToHistory(record) {
 }
 
 // --- HELPER: GET BROWSER INSTANCE ---
-// async function getBrowser() {
-//   // CHECK: Are we on Vercel?
-// if (process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_VERSION) {
-//     return await puppeteerCore.launch({
-//       args: chromium.args,
-//       defaultViewport: chromium.defaultViewport,
-//       // UPDATE THIS LINE:
-//       executablePath: await chromium.executablePath(), 
-//       headless: chromium.headless,
-//       ignoreHTTPSErrors: true,
-//     });
-// } else {
-//     // CONFIG FOR LOCALHOST (Windows/Mac)
-//     return await puppeteer.launch({
-//       headless: "new",
-//       args: ['--no-sandbox']
-//     });
-//   }
-// }
 async function getBrowser() {
   if (process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_VERSION) {
-    // VERCEL CONFIGURATION
-    
-    // 1. Explicitly load the font pack (helps prevent crashes)
-    await chromium.font('https://raw.githack.com/googlei18n/noto-emoji/master/fonts/NotoColorEmoji.ttf');
+    try {
+      // 1. Configure the path to the Remote Binary
+      // This matches the @sparticuz/chromium version 127.0.0
+      const executablePath = await chromium.executablePath(
+        "https://github.com/Sparticuz/chromium/releases/download/v127.0.0/chromium-v127.0.0-pack.tar"
+      );
 
-    // 2. Launch with explicit pathing
-    return await puppeteerCore.launch({
-      args: chromium.args,
-      defaultViewport: chromium.defaultViewport,
-      executablePath: await chromium.executablePath(
-        // We tell it where to find the browser binary manually if needed
-        `https://github.com/Sparticuz/chromium/releases/download/v119.0.2/chromium-v119.0.2-pack.tar`
-      ),
-      headless: chromium.headless,
-    });
+      // 2. Launch with specific flags to prevent File Locking (ETXTBSY)
+      const browser = await puppeteerCore.launch({
+        args: chromium.args,
+        defaultViewport: chromium.defaultViewport,
+        executablePath: executablePath,
+        headless: chromium.headless,
+      });
+      return browser;
+    } catch (error) {
+      console.error("Vercel Browser Error:", error);
+      throw error;
+    }
   } else {
-    // LOCAL CONFIGURATION
+    // --- LOCALHOST CONFIG ---
+    const puppeteer = await import('puppeteer').then(mod => mod.default); 
     return await puppeteer.launch({
       headless: "new",
       args: ['--no-sandbox']
@@ -76,23 +64,20 @@ async function getBrowser() {
 async function captureChart() {
   const browser = await getBrowser();
   const page = await browser.newPage();
-  
   await page.setViewport({ width: 1920, height: 1080 });
-  
-  // Go to TradingView
+
   await page.goto('https://www.tradingview.com/chart/?symbol=OANDA:XAUUSD', {
     waitUntil: 'networkidle2',
-    timeout: 30000 // Reduced timeout for Vercel speed
+    timeout: 30000 
   });
 
   try {
-    await page.waitForSelector('.chart-gui-wrapper', { visible: true, timeout: 10000 });
+    await page.waitForSelector('.chart-gui-wrapper', { visible: true, timeout: 5000 });
   } catch (e) {
-    console.log("Selector timeout, taking screenshot anyway...");
+    console.log("Chart selector timeout, attempting capture anyway.");
   }
 
-  // VERCEL TRICK: We cannot save to disk! We must return the image as "Base64" data
-  // This allows the frontend to show it without needing a file saved
+  // Return Base64 image
   const imageBuffer = await page.screenshot();
   const base64Image = `data:image/png;base64,${imageBuffer.toString('base64')}`;
   
@@ -105,11 +90,11 @@ async function getAnalysis() {
   const browser = await getBrowser();
   const page = await browser.newPage();
   
-  // Optimized for speed
+  // Speed Optimization: Block images/fonts/css to scrape faster
   await page.setRequestInterception(true);
   page.on('request', (req) => {
-    if (['image', 'stylesheet', 'font'].includes(req.resourceType())) {
-      req.abort(); // Don't load images/fonts to make scraping fast
+    if (['image', 'stylesheet', 'font', 'media'].includes(req.resourceType())) {
+      req.abort();
     } else {
       req.continue();
     }
@@ -128,10 +113,7 @@ async function getAnalysis() {
   // AI Logic
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) {
-    return {
-        headline: headlines[0] || "Market Update",
-        script: `Breaking News: ${headlines[0]}. Traders are reacting.`
-    };
+    return { headline: headlines[0] || "Market Data", script: "No API Key provided." };
   }
   
   const openai = new OpenAI({ apiKey: apiKey });
@@ -149,22 +131,21 @@ async function getAnalysis() {
 // 3. MAIN HANDLER
 export async function POST() {
   try {
+    // Run concurrently for speed
     const [imagePath, aiData] = await Promise.all([captureChart(), getAnalysis()]);
 
     const newRecord = {
       id: Date.now(),
       date: new Date().toLocaleString(),
-      image: imagePath, // Now storing Base64 string instead of file path
+      image: imagePath,
       headline: aiData.headline,
       script: aiData.script
     };
 
-    saveToHistory(newRecord);
-
     return NextResponse.json({ success: true, data: newRecord });
 
   } catch (error) {
-    console.error("Server Error:", error);
+    console.error("Critical Server Error:", error);
     return NextResponse.json({ success: false, error: error.message }, { status: 500 });
   }
 }
