@@ -1,6 +1,5 @@
 import { NextResponse } from 'next/server';
-import { GoogleGenerativeAI } from "@google/generative-ai"; // New Free AI
-import * as cheerio from 'cheerio';
+import { GoogleGenerativeAI } from "@google/generative-ai";
 import Parser from 'rss-parser';
 
 export const maxDuration = 60;
@@ -8,116 +7,121 @@ export const dynamic = 'force-dynamic';
 
 const parser = new Parser();
 
-// --- 1. NEWS AGGREGATOR (FREE) ---
-async function getForexFactory() {
+// --- 1. FETCH RAW OHLC DATA (High Resolution) ---
+async function getRawMarketData(mode) {
   try {
-    const res = await fetch('https://www.forexfactory.com/news', { headers: { 'User-Agent': 'Mozilla/5.0' } });
-    const html = await res.text();
-    const $ = cheerio.load(html);
-    const news = [];
-    $('.flexposts__story-title').slice(0, 3).each((i, el) => news.push(`[ForexFactory] ${$(el).text().trim()}`));
-    return news;
-  } catch (e) { return []; }
-}
+    const days = mode === 'daily' ? '7' : '30'; // 7 days for Daily, 30 for Weekly
+    console.log(`🔍 Fetching Raw OHLC Data for ${mode}...`);
 
-async function getInvestingCom() {
-  try {
-    const res = await fetch('https://www.investing.com/news/forex-news', { headers: { 'User-Agent': 'Mozilla/5.0' } });
-    const html = await res.text();
-    const $ = cheerio.load(html);
-    const news = [];
-    $('article a.title').slice(0, 3).each((i, el) => news.push(`[Investing.com] ${$(el).text().trim()}`));
-    return news;
-  } catch (e) { return []; }
-}
+    // Fetch Candle Data (Open, High, Low, Close)
+    const response = await fetch(`https://api.coingecko.com/api/v3/coins/pax-gold/ohlc?vs_currency=usd&days=${days}`);
+    const data = await response.json();
 
-async function getCNBC() {
-  try {
-    const feed = await parser.parseURL('https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=10000664');
-    return feed.items.slice(0, 3).map(item => `[CNBC] ${item.title}`);
-  } catch (e) { return []; }
-}
+    if (!Array.isArray(data)) throw new Error("CoinGecko API Error");
 
-async function getAllNews() {
-  const [ff, inv, cnbc] = await Promise.all([getForexFactory(), getInvestingCom(), getCNBC()]);
-  return [...ff, ...inv, ...cnbc].slice(0, 5);
-}
-
-// --- 2. GOOGLE GEMINI AI (FREE) ---
-async function analyzeMarket(headlines) {
-  try {
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) return { headline: "API Key Missing", script: "Please check .env.local" };
-
-    const genAI = new GoogleGenerativeAI(apiKey);
-    const model = genAI.getGenerativeModel({ model: "gemini-flash-latest"});
-
-    // NEW PROMPT: Simple words + Market Direction
-    const prompt = `
-      You are an expert Forex Market Analyst.
-      Here are the latest news headlines: ${JSON.stringify(headlines)}
-
-      Step 1: Analyze these headlines to determine if the market sentiment is BULLISH (Positive), BEARISH (Negative), or NEUTRAL.
-      Step 2: Summarize the news in very simple, easy-to-understand words that a beginner can understand. Explain *why* the market might move up or down.
-
-      Output Format:
-      "Market Sentiment: [BULLISH / BEARISH / NEUTRAL]
-      
-      Analysis: [Your simple summary here]"
-    `;
-
-    const result = await model.generateContent(prompt);
-    const response = await result.response;
-    const script = response.text();
-    
-    // We try to extract the sentiment for the headline
-    const sentimentMatch = script.match(/Market Sentiment:\s*(\w+)/i);
-    const sentiment = sentimentMatch ? sentimentMatch[1].toUpperCase() : "MARKET UPDATE";
-
-    return { 
-      headline: `Outlook: ${sentiment}`, 
-      script: script 
+    // Format for ApexCharts
+    // CoinGecko returns: [timestamp, open, high, low, close]
+    // We send this EXACT raw data to the frontend
+    return {
+      seriesData: data.map(item => ({
+        x: item[0], // Time
+        y: [item[1], item[2], item[3], item[4]] // [Open, High, Low, Close]
+      })),
+      isBullish: data[data.length-1][4] > data[0][1] // Compare Last Close vs First Open
     };
 
   } catch (error) {
-    console.error("Gemini Error:", error.message);
-    return { 
-      headline: "Market Update", 
-      script: `Latest updates: ${headlines[0]}. Analysts warn of potential volatility in the upcoming session.` 
-    };
+    console.error("Data Error:", error.message);
+    return null;
   }
 }
 
-// --- 3. MAIN HANDLER ---
-export async function POST() {
-  try {
-    const headlines = await getAllNews();
-    
-    // If no news found (internet issue), return fallback
-    if (headlines.length === 0) {
-       return NextResponse.json({ 
-         success: true, 
-         data: { 
-           id: Date.now(), 
-           date: new Date().toLocaleString(), 
-           image: "/chart-gold.png", 
-           headline: "Connection Error", 
-           script: "Could not fetch live news. Please check your internet connection." 
-         }
-       });
-    }
+// --- 2. NEWS AGGREGATOR ---
+function isToday(dateString) {
+  const date = new Date(dateString);
+  const today = new Date();
+  return date.getDate() === today.getDate() && date.getMonth() === today.getMonth();
+}
+function cleanText(text) { return text ? text.replace(/<[^>]*>?/gm, '').trim().substring(0, 300) : ""; }
 
-    const aiData = await analyzeMarket(headlines);
+async function getAllNews(mode) {
+  try {
+    const [cnbc, inv] = await Promise.all([
+      parser.parseURL('https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=10000664').catch(()=>({items:[]})),
+      parser.parseURL('https://www.investing.com/rss/news_1.rss').catch(()=>({items:[]}))
+    ]);
+
+    const filterFn = mode === 'daily' ? (item => isToday(item.pubDate)) : (() => true);
+    const allItems = [...cnbc.items, ...inv.items].filter(filterFn).slice(0, 5);
+    
+    return allItems.map(item => ({
+      source: 'News',
+      title: item.title,
+      summary: cleanText(item.contentSnippet || item.content)
+    }));
+  } catch(e) { return []; }
+}
+
+// --- 3. AI ANALYSIS ---
+async function analyzeMarket(newsItems, mode) {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) return { headline: "API Key Missing", script: "Check .env.local" };
+  const genAI = new GoogleGenerativeAI(apiKey);
+  
+  const MODELS = ["gemini-flash-lite-latest", "gemini-1.5-flash", "gemini-pro"];
+  const newsContext = newsItems.map(n => `- ${n.title}: ${n.summary}`).join("\n");
+
+  const prompt = `
+    Role: Financial Analyst. 
+    Task: Write a 3-sentence market script for ${mode} based on:
+    ${newsContext}
+    
+    Output Format:
+    "Market Sentiment: [BULLISH/BEARISH/NEUTRAL]
+    Probability: [0-100]%
+    Analysis: [Script]"
+  `;
+
+  for (const modelName of MODELS) {
+    try {
+      const model = genAI.getGenerativeModel({ model: modelName });
+      const result = await model.generateContent(prompt);
+      const script = result.response.text();
+      
+      const sentiment = (script.match(/Market Sentiment:\s*(\w+)/i) || [,"NEUTRAL"])[1].toUpperCase();
+      const probability = (script.match(/Probability:\s*(\d+)%/i) || [,"50"])[1];
+      const cleanScript = script.replace(/Market Sentiment:.*\n?/, '').replace(/Probability:.*\n?/, '').replace(/Analysis:\s*/, '').trim();
+
+      return { headline: `Outlook: ${sentiment} (${probability}%)`, sentiment, probability, script: cleanScript };
+    } catch (e) { continue; }
+  }
+  return { headline: "Market Update", sentiment: "NEUTRAL", probability: "50", script: `Breaking: ${newsItems[0]?.title}` };
+}
+
+// --- MAIN HANDLER ---
+export async function POST(req) {
+  try {
+    const body = await req.json(); 
+    const mode = body.timeRange || 'daily'; 
+    
+    const [chartData, newsItems] = await Promise.all([
+      getRawMarketData(mode),
+      getAllNews(mode)
+    ]);
+
+    const aiData = await analyzeMarket(newsItems, mode);
 
     return NextResponse.json({ 
       success: true, 
       data: {
         id: Date.now(),
+        type: mode,
         date: new Date().toLocaleString(),
-        image: "/chart-gold.png", // Static chart for speed/reliability
+        chartData: chartData, // Sending RAW OHLC data
         headline: aiData.headline,
         script: aiData.script,
-        sources: headlines // Show sources to prove it's real
+        sentiment: aiData.sentiment,
+        probability: aiData.probability
       } 
     });
 
@@ -126,6 +130,4 @@ export async function POST() {
   }
 }
 
-export async function GET() {
-  return NextResponse.json({ success: true, history: [] });
-}
+export async function GET() { return NextResponse.json({ success: true, history: [] }); }
